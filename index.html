@@ -635,6 +635,7 @@ function marcar(clube, gols) {
   }
 }
 function registrar(jogo, gA, gB) {
+  invalidarTabelas();
   const A = S.clubes[jogo.casa], B = S.clubes[jogo.fora];
   jogo.pl = [gA, gB];
   A.st.j++; B.st.j++; A.st.gp += gA; A.st.gc += gB; B.st.gp += gB; B.st.gc += gA;
@@ -655,8 +656,11 @@ function simularOutras(pularJogoDoJogador) {
     });
   }
 }
+let TB_CACHE = {}, TB_VER = 0;
+function invalidarTabelas() { TB_CACHE = {}; TB_VER++; }
 function tabelaDiv(d) {
-  return S.clubes.filter(c => c.div === d).sort((a, b) =>
+  if (TB_CACHE[d]) return TB_CACHE[d];
+  return TB_CACHE[d] = S.clubes.filter(c => c.div === d).sort((a, b) =>
     b.st.pts - a.st.pts || (b.st.gp - b.st.gc) - (a.st.gp - a.st.gc) || b.st.gp - a.st.gp || a.nome.localeCompare(b.nome));
 }
 function artilheiros(d, n) {
@@ -1623,6 +1627,7 @@ function subirDescer() {
     if (d < 2) { tb.slice(-4).forEach(c => c.novaDiv = d + 1); }
   }
   S.clubes.forEach(c => { if (c.novaDiv !== undefined) { c.div = c.novaDiv; delete c.novaDiv; } });
+  invalidarTabelas();
 }
 function novaTemporada() {
   const j = S.j;
@@ -1679,6 +1684,7 @@ function novaTemporada() {
     S.aposentado = true;
   }
   j.ovr = ovrDe(j);
+  invalidarTabelas();
   S.clubes.forEach(c => {
     c.st = { j: 0, v: 0, e: 0, d: 0, gp: 0, gc: 0, pts: 0 };
     c.art.forEach(a => { a.g = 0; if (Math.random() < 0.25) a.nome = nomeAleatorio(); });
@@ -1703,10 +1709,14 @@ function novaTemporada() {
   S.pediuSaida = false;
   salvar();
 }
+let REF_CACHE = {}, REF_VER = -1;
 function refLiga(d) {
+  const ver = S ? S.temporada : -1;
+  if (REF_VER !== ver) { REF_CACHE = {}; REF_VER = ver; }
+  if (REF_CACHE[d] !== undefined) return REF_CACHE[d];
   const fonte = (S && S.clubes) ? S.clubes : (MUNDO || []);
   const cl = fonte.filter(c => c.div === d);
-  return cl.length ? cl.reduce((t, c) => t + c.base, 0) / cl.length : 60;
+  return REF_CACHE[d] = cl.length ? cl.reduce((t, c) => t + c.base, 0) / cl.length : 60;
 }
 function salarioDe(c, rep) {
   const base = LIGAS[c.div].sal;
@@ -1907,13 +1917,50 @@ function assumirClube(i) {
 }
 
 /* ---------------- persistencia ---------------- */
-function salvar() { try { DB.set(CHAVE, JSON.stringify(S)); } catch (e) { } }
+let SAVE_PEND = false, SAVE_TIMER = null;
+function empacotar() {
+  const c = {};
+  for (const k in S) c[k] = S[k];
+  c.cal = S.cal.map(liga => liga.map(rod => rod.map(g => g.pl ? [g.casa, g.fora, g.pl[0], g.pl[1]] : [g.casa, g.fora])));
+  c.calC = 1;
+  return c;
+}
+function desempacotar(d) {
+  if (d.calC && d.cal) {
+    d.cal = d.cal.map(liga => liga.map(rod => rod.map(a =>
+      Array.isArray(a) ? { casa: a[0], fora: a[1], pl: a.length > 2 ? [a[2], a[3]] : null } : a)));
+    delete d.calC;
+  }
+  return d;
+}
+function gravar() {
+  SAVE_PEND = false;
+  if (SAVE_TIMER) { clearTimeout(SAVE_TIMER); SAVE_TIMER = null; }
+  if (!S) return;
+  try { DB.set(CHAVE, JSON.stringify(empacotar())); } catch (e) { }
+}
+function salvar() {
+  if (!S) return;
+  SAVE_PEND = true;
+  if (SAVE_TIMER) return;
+  SAVE_TIMER = setTimeout(function () { SAVE_TIMER = null; if (SAVE_PEND) gravar(); }, 600);
+}
+if (typeof document !== 'undefined' && document.addEventListener) {
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden' && SAVE_PEND) gravar(); });
+  if (typeof window !== 'undefined') window.addEventListener('pagehide', function () { if (SAVE_PEND) gravar(); });
+}
 function carregar() {
   const raw = DB.get(CHAVE);
   if (!raw) return false;
-  try { const d = JSON.parse(raw); if (!d || !d.j) return false; S = d; return true; } catch (e) { return false; }
+  try {
+    const d = desempacotar(JSON.parse(raw)); if (!d || !d.j) return false; S = d;
+    if (!S.meusClubes) S.meusClubes = S.meuClube ? [S.meuClube] : [];
+    if (S.selecao && S.selecao.nome === 'Copa das Nacoes') S.selecao.nome = 'Eliminatorias';
+    if (S.mundial && !S.mundial.fases) { S.mundial.fases = FASES_MUNDIAL.slice(); S.mundial.nome = 'Copa do Mundo'; S.mundial.tipo = 'mundial'; }
+    return true;
+  } catch (e) { return false; }
 }
-function apagar() { DB.del(CHAVE); S = null; P = null; TELA = 'carreira'; render(); }
+function apagar() { if (SAVE_TIMER) { clearTimeout(SAVE_TIMER); SAVE_TIMER = null; } SAVE_PEND = false; DB.del(CHAVE); S = null; P = null; TELA = 'carreira'; render(); }
 /* =========================================================
    INTERFACE
    ========================================================= */
@@ -2730,8 +2777,25 @@ function terminarPartidaTec() {
 }
 
 /* ---------------- render ---------------- */
+let ULT_CHAVE = null;
+function chaveTela() {
+  if (!S) return 'inicio|' + TELA;
+  return [TELA, UI.abaVida, UI.abaLiga, String(UI.clubeView), UI.comprando ? 'c' : '', S.fase, S.evento ? 'e' : '', (S.festas && S.festas.length) ? 'f' : ''].join('|');
+}
 function render() {
   const app = el('app');
+  const chave = chaveTela();
+  const manterScroll = ULT_CHAVE === chave;
+  const y = (typeof window !== 'undefined' && window.scrollY) || 0;
+  const restaurar = () => {
+    ULT_CHAVE = chave;
+    if (manterScroll && y && typeof window !== 'undefined' && window.scrollTo) window.scrollTo(0, y);
+  };
+  const saida = renderTelas(app);
+  restaurar();
+  return saida;
+}
+function renderTelas(app) {
   if (!S) { app.innerHTML = TELA === 'criacao' ? telaCriacao() : telaInicio(); return; }
   if (TELA === 'criacao') { app.innerHTML = telaCriacao(); return; }
   if (S.festas && S.festas.length) { app.innerHTML = barra() + telaCampeao(); return; }
